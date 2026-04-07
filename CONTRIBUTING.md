@@ -1,5 +1,7 @@
 # Contributing to CTF Buddy
 
+English | [Français](CONTRIBUTING.fr.md)
+
 Thanks for contributing.
 
 CTF Buddy is currently focused on network-first CTF workflows. Contributions are most useful when they improve:

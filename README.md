@@ -1,5 +1,7 @@
 # CTF Buddy
 
+English | [Français](README.fr.md)
+
 > AI-powered CTF helper for network challenges today, with a path toward a broader CTF assistant over time.
 
 CTF Buddy is currently focused on network and authentication-style challenges:

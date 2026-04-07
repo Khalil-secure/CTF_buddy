@@ -6,6 +6,9 @@ labels: enhancement
 assignees: ""
 ---
 
+French contributors are welcome. You can write this issue in French or English.
+Les contributeurs francophones sont les bienvenus. Vous pouvez ouvrir cette issue en français ou en anglais.
+
 ## Summary
 
 Describe the feature you want.
