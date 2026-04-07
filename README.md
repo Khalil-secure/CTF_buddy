@@ -11,7 +11,7 @@ CTF Buddy is currently focused on network and authentication-style challenges:
 
 Right now, the project is intentionally narrow. The goal is to make the network workflow solid first, then expand toward a more general-purpose CTF assistant for crypto, web, reversing, and mixed challenge chains in future versions.
 
-![CTF Buddy](../image.png)
+![CTF Buddy](/image.png)
 
 Drop a `.pcapng` file, describe the challenge, and let the agent figure out the rest.
 
