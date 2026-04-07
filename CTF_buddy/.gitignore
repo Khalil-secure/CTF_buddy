@@ -1,0 +1,33 @@
+# Environment
+.env
+*.env
+
+# Wordlists (too large for git — see README for setup)
+wordlists/rockyou.txt
+wordlists/*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Challenge files with solutions
+challenges/**/*.pcap
+challenges/**/*.pcapng
+challenges/**/*.cap
+
+# Hashcat potfile / session files
+*.pot
+hashcat.session*
+
+# Temp / OS
+*.tmp
+.DS_Store
+Thumbs.db
