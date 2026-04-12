@@ -1,241 +1,127 @@
-"""
-CTF Buddy — Claude Opus 4.6 agentic loop.
-Receives challenge description + file paths, runs tools autonomously,
-streams reasoning, and reports the flag when found.
-"""
-
-import os
 import sys
-import json
-from pathlib import Path
+import io
+import os
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
-import anthropic
+from dotenv import load_dotenv
+load_dotenv()
 
-from mindmap import classify, format_for_prompt
-from validator import find_flag, highlight
-from tools import TOOL_SCHEMAS, dispatch
-
-MODEL = "claude-opus-4-6"
-
-SYSTEM_PROMPT = """\
-You are CTF Buddy, an expert CTF (Capture The Flag) solver specializing in network forensics.
-
-## Your mission
-Analyse the challenge, choose the right tools, execute them, reason about the output, and find the flag.
-
-## Available tools
-You have access to specialized tools for:
-- pcap analysis (FTP, Telnet, HTTP credentials, Kerberos, OSPF, NTLM)
-- DNS zone transfers
-- Hash cracking: `ntlmv2_crack` (pure-Python, no hashcat), `hash_crack` (hashcat)
-- Credential decoding (base64, URL-encoding)
-- Caesar / ROT cipher brute force
-
-## Strategy
-1. For any pcap/network challenge — call `pcap_inspect` first. It detects all protocols
-   in one pass and tells you exactly what to do next.
-2. Read the findings and follow the recommended_next_steps.
-3. Use the targeted tool based on what was found:
-   - NTLM/NTLMv2 hash → `ntlmv2_crack` (preferred, no external tools needed)
-   - OSPF MD5 → `ospf_crack`
-   - DNS challenge → `dns_enum`
-   - Other hashes → `hash_crack` (requires hashcat)
-4. Report the flag clearly: FLAG: <value>
-
-Never guess which protocol a pcap contains — let `pcap_inspect` tell you.
-
-## Rules
-- Only work with the provided challenge files — do not scan external targets
-- If a tool fails, try a different approach or tool
-- Be methodical: explain your reasoning before each tool call
-- When you find the flag, state it clearly: FLAG: <value>
-
-{mind_map_section}
-"""
+from strands import Agent
+from tools.network import pcap_inspect, pcap_get_stream
+from tools.crypto import (
+    encoding_identify, decode_base64, decode_hex,
+    decode_rot, decode_binary, decode_url, hash_identify
+)
+from tools.web import web_inspect, web_get_paths, web_fuzz_param, web_inspect_cookie, web_solve_image_captcha, web_fetch_challenge, web_solve_sequence
+from tools.forensics import file_inspect, file_extract_strings, file_check_stego, file_extract_metadata
+from tools.workspace import write_and_run, read_workspace, submit_answer
 
 
-def run(
-    challenge_description: str,
-    challenge_files: list[str] | None = None,
-    wordlist: str | None = None,
-    max_turns: int = 20,
-    verbose: bool = True,
-) -> dict:
+def _build_model():
     """
-    Run the CTF Buddy agent on a challenge.
-
-    Args:
-        challenge_description: Text description of the challenge.
-        challenge_files: List of file paths (pcap, wordlist, etc.).
-        max_turns: Maximum agentic loop iterations.
-        verbose: Stream Claude's reasoning to stdout.
-
-    Returns:
-        dict with keys: flag, turns, conversation_summary
+    Auto-detect backend from .env:
+    - ANTHROPIC_API_KEY set  → Anthropic API (claude-sonnet-4-6)
+    - AWS_ACCESS_KEY_ID set  → AWS Bedrock (default, us-west-2)
+    Returns None to let Strands fall back to its default (Bedrock from env).
     """
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        from strands.models import AnthropicModel
+        print("[backend] Anthropic API")
+        return AnthropicModel(
+            model_id="claude-sonnet-4-6",
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+        )
+    print("[backend] AWS Bedrock")
+    return None  # Strands picks up AWS credentials from environment automatically
 
-    # ── Classify challenge ──────────────────────────────────────────────────
-    classifications = classify(challenge_description)
-    mind_map_section = format_for_prompt(classifications)
 
-    system = SYSTEM_PROMPT.format(mind_map_section=mind_map_section)
+_model = _build_model()
 
-    # ── Build initial user message ──────────────────────────────────────────
-    file_info = ""
-    if challenge_files:
-        for path in challenge_files:
-            p = Path(path).resolve()          # always give Claude absolute paths
-            if p.exists():
-                size = p.stat().st_size
-                file_info += f"\n- `{p.name}` ({size:,} bytes) — use exact path: `{p}`"
-            else:
-                file_info += f"\n- `{path}` (WARNING: file not found at {p})"
+agent = Agent(
+    model=_model,
+    system_prompt="""You are CTF Buddy, an expert AI assistant for Capture The Flag competitions.
 
-    wordlist_info = ""
-    if wordlist:
-        wl = Path(wordlist)
-        wordlist_info = f"\n\n## Wordlist\n- Use this exact path for all cracking tools: `{wl.resolve()}`"
+APPROACH — two layers, pick the right one:
 
-    user_message = f"""## Challenge
-{challenge_description}
+LAYER 1 — Direct tools (use for most challenges):
+  Use *_inspect / encoding_identify tools first to get the full picture,
+  then call targeted tools based on what the general scan found.
 
-## Challenge files{file_info if file_info else chr(10) + "- No files provided"}{wordlist_info}
+LAYER 2 — Workspace (use when tools get close but not all the way):
+  1. Call web_fetch_challenge(url) to read the page
+  2. Write custom Python code with write_and_run(code) — you can import any tool:
+       from tools.crypto import decode_base64, decode_hex
+       from tools.network import pcap_inspect
+       from tools.web import web_inspect
+       from tools.forensics import file_inspect
+  3. Use read_workspace() to review or iterate on your code
+  4. Use submit_answer(url, answer) to submit the final result
 
-Please solve this challenge. Start by reasoning about what type of challenge it is, then use the available tools.
-Use the exact file paths provided above — do not guess alternative paths.
-"""
+Use Layer 1 for simple/known challenge types.
+Use Layer 2 when the challenge needs custom logic or an unknown format.
+Always explain your reasoning before writing code.
 
-    if verbose:
-        print("\n" + "=" * 60)
-        print("[CTF BUDDY] Starting analysis")
-        print("=" * 60)
-        if classifications:
-            print(f"[mind-map] matched: {classifications[0]['type']} (score {classifications[0]['score']})")
-        print()
+NETWORK TOOLS:
+- pcap_inspect(pcap_path): Full overview of any pcap — call first on network challenges
+- pcap_get_stream(pcap_path, protocol, stream_index): Drill into a specific stream
 
-    # ── Agentic loop ────────────────────────────────────────────────────────
-    messages = [{"role": "user", "content": user_message}]
-    found_flag = None
-    turns = 0
+CRYPTO TOOLS:
+- encoding_identify(data): Identify encoding type — call first on any suspicious string
+- decode_base64(data): Decode Base64 / Base64 URL-safe
+- decode_hex(data): Decode hex (handles 0x, \\x, colon formats)
+- decode_rot(data, shift): ROT13 / Caesar. shift=0 brute forces all 25
+- decode_binary(data): Decode space-separated binary (01001000 ...)
+- decode_url(data): URL-decode percent-encoded strings
+- hash_identify(hash_string): Identify hash type and get hashcat mode
 
-    while turns < max_turns:
-        turns += 1
+WEB TOOLS:
+- web_inspect(url): Full overview of a web target — call first on web challenges
+- web_get_paths(url): Discover hidden directories and files
+- web_fuzz_param(url, param, payload_type): Test a parameter for SQLi / XSS / LFI
+- web_inspect_cookie(cookie_value): Analyse a cookie (JWT, Flask session, base64, etc.)
+- web_solve_image_captcha(url, form_field): Fetch page, OCR the captcha image locally, submit answer
+- web_fetch_challenge(url): Fetch any challenge page — returns clean text + raw HTML so you can read and understand it before deciding how to solve it
+- web_solve_sequence(url, u0, target_n, formula_expr, submit_url_template, recurrence_type): Solve any math recurrence and submit. Always call web_fetch_challenge first to read the page, then pass what you find here. formula_expr is a Python expression using 'u' (current value) and 'n' (index). Works for linear, geometric, fibonacci-like, modular.
 
-        if verbose:
-            print(f"[turn {turns}] Calling Claude...", end=" ", flush=True)
+FORENSICS TOOLS:
+- file_inspect(file_path): General overview of any file — call first on forensics challenges
+- file_extract_strings(file_path, min_length): Extract all printable strings from a binary
+- file_check_stego(file_path): Check image for steganography (LSB, appended data, embedded archives)
+- file_extract_metadata(file_path): Extract EXIF and metadata from images/docs
 
-        # Stream the response
-        with client.messages.stream(
-            model=MODEL,
-            max_tokens=8192,
-            thinking={"type": "adaptive"},
-            system=system,
-            tools=TOOL_SCHEMAS,
-            messages=messages,
-        ) as stream:
-            response_text = ""
-            tool_calls = []
+WORKSPACE TOOLS (Layer 2 — for hard/custom challenges):
+- web_fetch_challenge(url): Fetch any challenge page — returns clean text + raw HTML
+- write_and_run(code): Write Python code to workspace.py and run it. Import tools as utilities inside.
+- read_workspace(): Read the current workspace.py code
+- submit_answer(url, answer, method, field): Submit an answer via GET or POST
+""",
+    tools=[
+        # Network
+        pcap_inspect, pcap_get_stream,
+        # Crypto
+        encoding_identify, decode_base64, decode_hex,
+        decode_rot, decode_binary, decode_url, hash_identify,
+        # Web
+        web_inspect, web_get_paths, web_fuzz_param, web_inspect_cookie,
+        web_solve_image_captcha, web_fetch_challenge, web_solve_sequence,
+        # Forensics
+        file_inspect, file_extract_strings, file_check_stego, file_extract_metadata,
+        # Workspace (Layer 2)
+        web_fetch_challenge, write_and_run, read_workspace, submit_answer,
+    ],
+)
 
-            if verbose:
-                print()  # newline after "Calling Claude..."
+if __name__ == "__main__":
+    print("CTF Buddy 2.0")
+    print("=" * 40)
+    print("Type 'exit' to quit\n")
 
-            for event in stream:
-                # Stream text to terminal
-                if event.type == "content_block_delta":
-                    if event.delta.type == "text_delta":
-                        if verbose:
-                            print(event.delta.text, end="", flush=True)
-                        response_text += event.delta.text
-                    elif event.delta.type == "thinking_delta":
-                        pass  # thinking is internal; skip streaming it
-
-                elif event.type == "content_block_start":
-                    if event.content_block.type == "tool_use":
-                        tool_calls.append({
-                            "id": event.content_block.id,
-                            "name": event.content_block.name,
-                            "input_chunks": [],
-                        })
-                    elif event.content_block.type == "thinking" and verbose:
-                        print("\n[thinking...]", flush=True)
-
-                elif event.type == "content_block_delta":
-                    if event.delta.type == "input_json_delta" and tool_calls:
-                        tool_calls[-1]["input_chunks"].append(event.delta.partial_json)
-
-            final_msg = stream.get_final_message()
-
-        if verbose:
-            print()  # newline after response
-
-        # ── Append assistant turn ───────────────────────────────────────────
-        messages.append({"role": "assistant", "content": final_msg.content})
-
-        # ── Check for flag in text ──────────────────────────────────────────
-        flag = find_flag(response_text)
-        if flag and not found_flag:
-            found_flag = flag
-            if verbose:
-                print(f"\n[FLAG] FLAG DETECTED: {flag}\n")
-
-        # ── Handle tool calls ───────────────────────────────────────────────
-        if final_msg.stop_reason == "end_turn":
+    while True:
+        user_input = input("You: ").strip()
+        if user_input.lower() in ("exit", "quit"):
             break
-
-        if final_msg.stop_reason == "tool_use":
-            tool_results = []
-
-            for block in final_msg.content:
-                if block.type != "tool_use":
-                    continue
-
-                tool_name = block.name
-                tool_input = block.input
-
-                if verbose:
-                    print(f"\n[TOOL] Tool: {tool_name}")
-                    print(f"   Input: {json.dumps(tool_input, indent=2)}")
-
-                raw_result = dispatch(tool_name, tool_input)
-
-                if verbose:
-                    result_preview = raw_result[:500] + ("..." if len(raw_result) > 500 else "")
-                    print(f"   Result: {result_preview}")
-
-                # Check result for flag
-                flag_in_result = find_flag(raw_result)
-                if flag_in_result and not found_flag:
-                    found_flag = flag_in_result
-                    if verbose:
-                        print(f"\n[FLAG] FLAG IN TOOL RESULT: {flag_in_result}\n")
-
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": raw_result,
-                })
-
-            messages.append({"role": "user", "content": tool_results})
+        if not user_input:
             continue
-
-        # pause_turn or unexpected — continue
-        if final_msg.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": final_msg.content})
-            continue
-
-        break  # unexpected stop reason
-
-    if verbose:
-        print("\n" + "=" * 60)
-        if found_flag:
-            print(f"[OK] SOLVED in {turns} turns — Flag: {found_flag}")
-        else:
-            print(f"[!!]  No flag found after {turns} turns")
-        print("=" * 60 + "\n")
-
-    return {
-        "flag": found_flag,
-        "turns": turns,
-        "solved": found_flag is not None,
-    }
+        print()
+        agent(user_input)
+        print()

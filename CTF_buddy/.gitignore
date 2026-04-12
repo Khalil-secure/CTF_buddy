@@ -1,33 +1,23 @@
-# Environment
-.env
-*.env
-
-# Wordlists (too large for git — see README for setup)
-wordlists/rockyou.txt
-wordlists/*.txt
-
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
 .venv/
-venv/
+.env
+__pycache__/
+*.pyc
+*.pycache
+*.db
+*.json
+!example.env
 
-# Challenge files with solutions
-challenges/**/*.pcap
-challenges/**/*.pcapng
-challenges/**/*.cap
+# Generated per-challenge, never commit
+workspace.py
 
-# Hashcat potfile / session files
-*.pot
-hashcat.session*
+# Challenge files
+*.pcap
+*.pcapng
+*.png
+*.jpg
+*.jpeg
+captcha_sample.png
 
-# Temp / OS
-*.tmp
+# OS
 .DS_Store
 Thumbs.db

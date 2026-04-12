@@ -1,250 +1,256 @@
-"""
-Crypto / encoding tools for CTF challenges.
-Covers: hash cracking (hashcat), base64, URL-decode, caesar cipher.
-"""
-
-import base64
-import hashlib
-import hmac
-import json
-import tempfile
-import urllib.parse
-from pathlib import Path
-from string import ascii_lowercase, ascii_uppercase
-
-from sandbox import safe_run
-
-TMP = Path(tempfile.gettempdir())
-
-DEFAULT_WORDLIST = str(Path(__file__).parent.parent / "wordlists" / "rockyou.txt")
-
-# hashcat mode reference
-HASH_MODES = {
-    "md5":        0,
-    "sha1":       100,
-    "sha256":     1400,
-    "sha512":     1700,
-    "ntlm":       1000,
-    "cisco_md5":  500,
-    "cisco_sha1": 5800,
-    "bcrypt":     3200,
-    "wpa2":       22000,
-    "krb5pa_18":  19900,
-}
+from strands import tool
 
 
-# ─────────────────────────────────────────────────────────────
-# TOOL 5: Generic hash cracker
-# Root-Me: CISCO, NTLM, MD5, etc.
-# ─────────────────────────────────────────────────────────────
-
-def hash_crack(hash_value: str, mode: int | str, wordlist: str = DEFAULT_WORDLIST) -> dict:
+@tool
+def encoding_identify(data: str) -> dict:
     """
-    Crack a hash using hashcat.
-    mode can be an integer (hashcat mode) or a string key from HASH_MODES.
+    Analyse a string and identify what encoding it likely is, without decoding it yet.
+    Call this first — it tells you which specific decoder to use next.
+
+    Args:
+        data: The string to analyse
+
+    Returns:
+        Most likely encoding, confidence, visual clues, and which tool to call next
     """
-    result = {"password": None, "hash": hash_value, "mode": mode, "error": None}
+    import re
+
+    h = data.strip()
+    length = len(h)
+    clues = []
+    candidates = []
+
+    # Base64 clues
+    b64_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+    b64_urlsafe_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=")
+    if set(h) <= b64_chars and length % 4 == 0:
+        candidates.append({"encoding": "base64", "confidence": "high", "tool": "decode_base64"})
+        clues.append("only base64 chars, correct padding length")
+    elif set(h) <= b64_urlsafe_chars and "-" in h or "_" in h:
+        candidates.append({"encoding": "base64_urlsafe", "confidence": "high", "tool": "decode_base64"})
+        clues.append("contains - or _ which are URL-safe base64 chars")
+
+    # Hex clues
+    clean_hex = h.replace(" ", "").replace("0x", "").replace("\\x", "").replace(":", "")
+    if all(c in "0123456789abcdefABCDEF" for c in clean_hex) and len(clean_hex) % 2 == 0:
+        candidates.append({"encoding": "hex", "confidence": "high", "tool": "decode_hex"})
+        clues.append("only hex chars, even length")
+
+    # Binary clues
+    groups = h.split()
+    if all(len(g) == 8 and set(g) <= {"0", "1"} for g in groups):
+        candidates.append({"encoding": "binary", "confidence": "high", "tool": "decode_binary"})
+        clues.append("space-separated 8-bit groups")
+
+    # URL encoded clues
+    if "%" in h and re.search(r"%[0-9A-Fa-f]{2}", h):
+        candidates.append({"encoding": "url", "confidence": "high", "tool": "decode_url"})
+        clues.append("contains %XX percent-encoded sequences")
+
+    # ROT13 — looks like English but letters are shifted
+    alpha_ratio = sum(1 for c in h if c.isalpha()) / max(length, 1)
+    if alpha_ratio > 0.7 and not h.isascii() is False:
+        candidates.append({"encoding": "rot13", "confidence": "medium", "tool": "decode_rot"})
+        clues.append("mostly alphabetic — could be ROT13 or Caesar shift")
+
+    # Hash clues
+    is_hex_only = all(c in "0123456789abcdefABCDEF" for c in h)
+    if is_hex_only and length in (32, 40, 56, 64, 96, 128):
+        candidates.append({"encoding": "hash", "confidence": "high", "tool": "hash_identify"})
+        clues.append(f"hex string of length {length} matches a known hash size")
+
+    if not candidates:
+        candidates.append({"encoding": "unknown", "confidence": "low", "tool": "none — inspect manually"})
+        clues.append("no pattern matched — may be a custom or chained encoding")
+
+    return {
+        "input_preview": h[:80] + ("..." if length > 80 else ""),
+        "length": length,
+        "clues": clues,
+        "candidates": candidates,
+        "top_recommendation": candidates[0],
+    }
+
+
+@tool
+def decode_base64(data: str) -> dict:
+    """
+    Decode a Base64 or Base64 URL-safe string.
+    Handles missing padding automatically.
+
+    Args:
+        data: Base64-encoded string (standard or URL-safe)
+
+    Returns:
+        Decoded text, or hex representation if the result is binary
+    """
+    import base64
+
+    result = {"input": data, "decoded_text": None, "decoded_hex": None, "error": None}
     try:
-        if isinstance(mode, str):
-            if mode.lower() not in HASH_MODES:
-                result["error"] = f"Unknown mode '{mode}'. Known: {list(HASH_MODES.keys())}"
-                return result
-            mode = HASH_MODES[mode.lower()]
-
-        hash_file = str(TMP / "ctf_buddy_hash.txt")
-        Path(hash_file).write_text(hash_value.strip())
-
-        # Check potfile first
-        show = safe_run([
-            "hashcat", "-m", str(mode), hash_file, wordlist, "--force", "--show",
-        ], capture_output=True, text=True)
-
-        if show.stdout.strip():
-            result["password"] = show.stdout.strip().split(":")[-1]
-            return result
-
-        # Actually crack
-        safe_run([
-            "hashcat", "-m", str(mode), hash_file, wordlist, "--force",
-        ], capture_output=True)
-
-        show2 = safe_run([
-            "hashcat", "-m", str(mode), hash_file, wordlist, "--force", "--show",
-        ], capture_output=True, text=True)
-
-        if show2.stdout.strip():
-            result["password"] = show2.stdout.strip().split(":")[-1]
-        else:
-            result["error"] = "Wordlist exhausted — hash not cracked"
-
+        clean = data.strip().replace(" ", "")
+        # Normalise URL-safe to standard
+        clean = clean.replace("-", "+").replace("_", "/")
+        clean += "=" * (-len(clean) % 4)
+        raw = base64.b64decode(clean)
+        result["decoded_hex"] = raw.hex()
+        result["decoded_text"] = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        result["decoded_text"] = "(binary data — see decoded_hex)"
     except Exception as e:
         result["error"] = str(e)
     return result
 
 
-# ─────────────────────────────────────────────────────────────
-# TOOL 6: Credential decoder (base64, URL-encoded)
-# Root-Me: HTTP Basic Auth, Twitter auth, OAuth
-# ─────────────────────────────────────────────────────────────
+@tool
+def decode_hex(data: str) -> dict:
+    """
+    Decode a hex-encoded string to text or bytes.
+    Handles 0x prefix, \\x escapes, colon-separated, and plain hex.
 
-def decode_credentials(encoded: str) -> dict:
+    Args:
+        data: Hex string in any common format
+
+    Returns:
+        Decoded text and raw hex bytes
     """
-    Decode base64 / URL-encoded credential strings.
-    Tries URL-decode → base64 → split on ':' for user:password.
-    """
-    result = {"decoded": None, "username": None, "password": None, "steps": [], "error": None}
+    result = {"input": data, "decoded_text": None, "decoded_hex": None, "error": None}
     try:
-        s = encoded.strip()
-
-        # Step 1: strip common prefixes
-        for prefix in ("Basic ", "Bearer ", "basic ", "bearer "):
-            if s.startswith(prefix):
-                s = s[len(prefix):]
-                result["steps"].append(f"Stripped prefix: '{prefix.strip()}'")
-                break
-
-        # Step 2: URL-decode (handle double-encoding)
-        url1 = urllib.parse.unquote(s)
-        if url1 != s:
-            s = url1
-            result["steps"].append("URL-decoded (single)")
-        url2 = urllib.parse.unquote(s)
-        if url2 != s:
-            s = url2
-            result["steps"].append("URL-decoded (double)")
-
-        # Step 3: base64 decode (pad as needed)
-        padded = s + "=" * ((4 - len(s) % 4) % 4)
-        decoded = base64.b64decode(padded).decode("utf-8", errors="replace")
-        result["decoded"] = decoded
-        result["steps"].append(f"Base64 decoded → '{decoded}'")
-
-        if ":" in decoded:
-            result["username"], result["password"] = decoded.split(":", 1)
-
+        clean = data.strip().replace(" ", "").replace("0x", "").replace("\\x", "").replace(":", "")
+        raw = bytes.fromhex(clean)
+        result["decoded_hex"] = raw.hex()
+        result["decoded_text"] = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        result["decoded_text"] = "(binary data — see decoded_hex)"
     except Exception as e:
         result["error"] = str(e)
     return result
 
 
-# ─────────────────────────────────────────────────────────────
-# TOOL 7: Base64 decode (raw)
-# ─────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────
-# TOOL: Pure-Python NTLMv2 cracker (no hashcat required)
-# ─────────────────────────────────────────────────────────────
-
-def ntlmv2_crack(ntlmv2_hash: str, wordlist: str = DEFAULT_WORDLIST) -> dict:
+@tool
+def decode_rot(data: str, shift: int = 13) -> dict:
     """
-    Crack an NTLMv2 hash using a pure-Python dictionary attack.
-    No hashcat required.
+    Decode a ROT/Caesar cipher. Defaults to ROT13.
+    If shift=0, brute forces all 25 shifts and returns all results.
 
-    NTLMv2 format (hashcat mode 5600):
-      username::domain:ServerChallenge:NTProofStr:blob
+    Args:
+        data: The encoded text
+        shift: Number of positions to shift (1-25). Use 0 to brute force all shifts.
 
-    Algorithm:
-      NT = MD4(UTF-16-LE(password))
-      ResponseKeyNT = HMAC-MD5(NT, UTF-16-LE(upper(username) + domain))
-      NTProofStr = HMAC-MD5(ResponseKeyNT, ServerChallenge_bytes + Blob_bytes)
+    Returns:
+        Decoded text for the given shift, or all 25 shifts if shift=0
     """
-    result = {"password": None, "hash": ntlmv2_hash, "error": None}
+    def caesar(text, n):
+        out = ""
+        for c in text:
+            if c.isalpha():
+                base = ord("A") if c.isupper() else ord("a")
+                out += chr((ord(c) - base + n) % 26 + base)
+            else:
+                out += c
+        return out
+
+    if shift == 0:
+        return {
+            "input": data,
+            "all_shifts": {f"shift_{i}": caesar(data, i) for i in range(1, 26)}
+        }
+
+    return {
+        "input": data,
+        "shift": shift,
+        "decoded": caesar(data, shift),
+    }
+
+
+@tool
+def decode_binary(data: str) -> dict:
+    """
+    Decode binary (space-separated 8-bit groups) to text.
+
+    Args:
+        data: Binary string like '01101000 01100101 01101100 01101100 01101111'
+
+    Returns:
+        Decoded text
+    """
+    result = {"input": data, "decoded_text": None, "error": None}
     try:
-        # Parse the hash
-        parts = ntlmv2_hash.strip().split(":")
-        if len(parts) < 6:
-            result["error"] = f"Invalid NTLMv2 format — expected 6 colon-separated parts, got {len(parts)}"
-            return result
-
-        # username::domain:ServerChallenge:NTProofStr:blob
-        username   = parts[0]
-        domain     = parts[2]
-        challenge  = bytes.fromhex(parts[3])
-        ntproofstr = bytes.fromhex(parts[4])
-        blob       = bytes.fromhex(parts[5])
-
-        def _md4(data: bytes) -> bytes:
-            """MD4 via hashlib (Python 3.6+ includes it via OpenSSL)."""
-            h = hashlib.new("md4")
-            h.update(data)
-            return h.digest()
-
-        def _hmac_md5(key: bytes, msg: bytes) -> bytes:
-            return hmac.new(key, msg, hashlib.md5).digest()
-
-        target_user = (username.upper() + domain).encode("utf-16-le")
-
-        with open(wordlist, "rb") as f:
-            for line in f:
-                pw = line.rstrip(b"\n\r")
-                try:
-                    nt_hash        = _md4(pw.decode("latin-1").encode("utf-16-le"))
-                    response_key   = _hmac_md5(nt_hash, target_user)
-                    computed_proof = _hmac_md5(response_key, challenge + blob)
-                    if computed_proof == ntproofstr:
-                        result["password"] = pw.decode("latin-1")
-                        return result
-                except Exception:
-                    continue
-
-        result["error"] = "Wordlist exhausted — password not found"
-
+        groups = data.strip().split()
+        result["decoded_text"] = "".join(chr(int(g, 2)) for g in groups)
     except Exception as e:
         result["error"] = str(e)
     return result
 
 
-def base64_decode(encoded: str) -> dict:
-    """Decode a raw base64 string."""
-    result = {"decoded": None, "error": None}
+@tool
+def decode_url(data: str) -> dict:
+    """
+    URL-decode a percent-encoded string.
+
+    Args:
+        data: URL-encoded string like 'hello%20world'
+
+    Returns:
+        Decoded text
+    """
+    import urllib.parse
+    result = {"input": data, "decoded_text": None, "error": None}
     try:
-        padded = encoded.strip() + "=" * ((4 - len(encoded.strip()) % 4) % 4)
-        result["decoded"] = base64.b64decode(padded).decode("utf-8", errors="replace")
+        result["decoded_text"] = urllib.parse.unquote(data)
     except Exception as e:
         result["error"] = str(e)
     return result
 
 
-# ─────────────────────────────────────────────────────────────
-# TOOL 8: Caesar / ROT-N brute force
-# ─────────────────────────────────────────────────────────────
-
-def caesar_crack(ciphertext: str, shift: int | None = None) -> dict:
+@tool
+def hash_identify(hash_string: str) -> dict:
     """
-    Brute-force all 26 ROT shifts of a caesar cipher.
-    If shift is given, return only that rotation.
+    Identify the type of a hash and get the hashcat mode for cracking.
+    Call this before attempting to crack any hash.
+
+    Args:
+        hash_string: The hash to identify
+
+    Returns:
+        Possible hash types with hashcat modes and suggested next steps
     """
-    result = {"results": [], "best_guess": None, "error": None}
-    try:
-        common_words = {"the", "flag", "ctf", "password", "secret", "key", "and", "for", "are"}
+    h = hash_string.strip()
+    length = len(h)
+    is_hex = all(c in "0123456789abcdefABCDEF" for c in h)
 
-        def rotate(text: str, n: int) -> str:
-            out = []
-            for ch in text:
-                if ch in ascii_lowercase:
-                    out.append(ascii_lowercase[(ascii_lowercase.index(ch) + n) % 26])
-                elif ch in ascii_uppercase:
-                    out.append(ascii_uppercase[(ascii_uppercase.index(ch) + n) % 26])
-                else:
-                    out.append(ch)
-            return "".join(out)
+    candidates = []
 
-        shifts_to_try = [shift] if shift is not None else range(26)
-        best_score = -1
+    if is_hex:
+        if length == 32:
+            candidates += [{"type": "MD5", "hashcat_mode": 0}, {"type": "NTLM", "hashcat_mode": 1000}]
+        elif length == 40:
+            candidates.append({"type": "SHA1", "hashcat_mode": 100})
+        elif length == 56:
+            candidates.append({"type": "SHA224", "hashcat_mode": 1300})
+        elif length == 64:
+            candidates.append({"type": "SHA256", "hashcat_mode": 1400})
+        elif length == 96:
+            candidates.append({"type": "SHA384", "hashcat_mode": 10800})
+        elif length == 128:
+            candidates.append({"type": "SHA512", "hashcat_mode": 1700})
 
-        for n in shifts_to_try:
-            rotated = rotate(ciphertext, n)
-            words = set(rotated.lower().split())
-            score = len(words & common_words)
-            entry = {"shift": n, "text": rotated, "score": score}
-            result["results"].append(entry)
+    if h.startswith("$2b$") or h.startswith("$2a$"):
+        candidates.append({"type": "bcrypt", "hashcat_mode": 3200})
+    if h.startswith("$6$"):
+        candidates.append({"type": "SHA512crypt", "hashcat_mode": 1800})
+    if h.startswith("$5$"):
+        candidates.append({"type": "SHA256crypt", "hashcat_mode": 7400})
+    if h.startswith("$1$"):
+        candidates.append({"type": "MD5crypt", "hashcat_mode": 500})
+    if "::" in h and len(h.split(":")) >= 5:
+        candidates.append({"type": "NTLMv2", "hashcat_mode": 5600})
+    if h.startswith("$krb5pa$"):
+        candidates.append({"type": "Kerberos pre-auth", "hashcat_mode": 19900})
 
-            if score > best_score:
-                best_score = score
-                result["best_guess"] = entry
-
-        result["results"].sort(key=lambda x: x["score"], reverse=True)
-
-    except Exception as e:
-        result["error"] = str(e)
-    return result
+    return {
+        "hash": h,
+        "length": length,
+        "candidates": candidates if candidates else [{"type": "unknown — inspect manually", "hashcat_mode": None}],
+        "next_step": "run hashcat with the matching mode and rockyou.txt",
+    }

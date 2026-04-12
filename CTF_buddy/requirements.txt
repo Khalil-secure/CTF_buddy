@@ -1,2 +1,8 @@
-# Dependencies are listed in the root requirements.txt
-# Install from the project root: pip install -r requirements.txt
+strands-agents
+strands-agents-tools
+boto3
+python-dotenv
+requests
+scapy
+Pillow
+easyocr
