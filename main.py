@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Root launcher for the nested CTF Buddy app."""
+"""Root entry point — delegates to CTF_buddy/main.py."""
 
-from __future__ import annotations
-
-import runpy
 import sys
 from pathlib import Path
 
+_root = Path(__file__).resolve().parent
+_pkg = _root / "CTF_buddy"
 
-PROJECT_MAIN = Path(__file__).resolve().parent / "CTF_buddy" / "main.py"
+# CTF_buddy/main.py uses bare imports (e.g. `from agent import run`)
+# so the package directory must be first on the path.
+for _p in [str(_pkg), str(_root)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
+from CTF_buddy.main import main  # noqa: E402
 
 if __name__ == "__main__":
-    if not PROJECT_MAIN.exists():
-        raise SystemExit(f"Could not find project entrypoint at {PROJECT_MAIN}")
-
-    sys.path.insert(0, str(PROJECT_MAIN.parent))
-    runpy.run_path(str(PROJECT_MAIN), run_name="__main__")
+    main()

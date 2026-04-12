@@ -129,9 +129,10 @@ curl -L https://github.com/brannondorsey/naive-hashcat/releases/download/data/ro
      -o wordlists/rockyou.txt
 ```
 
-**API key** — create `.env`:
-```
-ANTHROPIC_API_KEY=sk-ant-...
+**API key** — copy `.env.example` to `.env` and fill in your key:
+```bash
+cp .env.example .env
+# then edit .env and set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ---
@@ -232,21 +233,28 @@ I'll start with pcap_inspect to identify what's in this capture...
 ## Architecture
 
 ```
-ctf_buddy/
-├── main.py            CLI entry point + .env loading
-├── agent.py           Claude Opus 4.6 agentic loop (streaming + adaptive thinking)
-├── mindmap.py         Keyword-based challenge classifier → primes Claude's context
-├── sandbox.py         Subprocess safety layer (command allowlist + forbidden patterns)
-├── validator.py       Flag pattern detection (CTF{}, HTB{}, cracked keys, hashes)
+CTF_buddy/                     ← repo root
+├── main.py                    single entry point
+├── requirements.txt           pip dependencies
+├── .env.example               API key template
 │
-├── tools/
-│   ├── registry.py    Tool schemas (Claude API format) + dispatcher
-│   ├── network.py     pcap_inspect · kerberos_crack · dns_enum · ospf_crack · ntlm_extract
-│   └── crypto.py      hash_crack · decode · base64_decode · caesar_crack
+├── CTF_buddy/                 ← Python package
+│   ├── main.py                CLI argument parsing + local analysis mode
+│   ├── agent.py               Claude Opus 4.6 agentic loop (streaming + adaptive thinking)
+│   ├── mindmap.py             Keyword-based challenge classifier → primes Claude's context
+│   ├── sandbox.py             Subprocess safety layer (command allowlist + forbidden patterns)
+│   ├── validator.py           Flag pattern detection (CTF{}, HTB{}, cracked keys, hashes)
+│   │
+│   ├── tools/
+│   │   ├── registry.py        Tool schemas (Claude API format) + dispatcher
+│   │   ├── network.py         pcap_inspect · kerberos_crack · dns_enum · ospf_crack · ntlm_extract
+│   │   └── crypto.py          hash_crack · decode · base64_decode · caesar_crack
+│   │
+│   ├── wordlists/             place rockyou.txt here
+│   └── challenges/            drop your .pcapng files here
+│       └── rootme_network/
 │
-├── wordlists/         Place rockyou.txt here
-└── challenges/        Drop your .pcapng files here
-    └── rootme_network/
+└── tests/                     unittest suite
 ```
 
 ### Key design decisions

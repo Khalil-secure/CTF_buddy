@@ -111,9 +111,10 @@ curl -L https://github.com/brannondorsey/naive-hashcat/releases/download/data/ro
      -o wordlists/rockyou.txt
 ```
 
-**Clé API** — créez un fichier `.env` :
-```
-ANTHROPIC_API_KEY=sk-ant-...
+**Clé API** — copiez `.env.example` vers `.env` et renseignez votre clé :
+```bash
+cp .env.example .env
+# puis éditez .env et définissez ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ---
@@ -168,20 +169,27 @@ Pour le moment, le texte du terminal reste en anglais. Cette adaptation françai
 ## Architecture
 
 ```
-ctf_buddy/
-├── main.py            point d'entrée CLI + chargement du .env
-├── agent.py           boucle agentique Claude Opus 4.6
-├── mindmap.py         classification par mots-clés
-├── sandbox.py         couche de sécurité pour les subprocess
-├── validator.py       détection de flags
+CTF_buddy/                     ← racine du dépôt
+├── main.py                    point d'entrée unique
+├── requirements.txt           dépendances pip
+├── .env.example               modèle de clé API
 │
-├── tools/
-│   ├── registry.py    schémas des outils + dispatcher
-│   ├── network.py     outils réseau
-│   └── crypto.py      outils crypto et décodage
+├── CTF_buddy/                 ← package Python
+│   ├── main.py                parsing des arguments CLI + mode analyse locale
+│   ├── agent.py               boucle agentique Claude Opus 4.6
+│   ├── mindmap.py             classification par mots-clés
+│   ├── sandbox.py             couche de sécurité pour les subprocess
+│   ├── validator.py           détection de flags
+│   │
+│   ├── tools/
+│   │   ├── registry.py        schémas des outils + dispatcher
+│   │   ├── network.py         outils réseau
+│   │   └── crypto.py          outils crypto et décodage
+│   │
+│   ├── wordlists/             placez rockyou.txt ici
+│   └── challenges/            placez vos fichiers de challenge ici
 │
-├── wordlists/         placez rockyou.txt ici
-└── challenges/        placez vos fichiers de challenge ici
+└── tests/                     suite de tests unitaires
 ```
 
 ### Choix de conception

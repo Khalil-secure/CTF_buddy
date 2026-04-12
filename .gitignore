@@ -32,3 +32,4 @@ hashcat.session*
 *.tmp
 .DS_Store
 Thumbs.db
+rockyou.txt
